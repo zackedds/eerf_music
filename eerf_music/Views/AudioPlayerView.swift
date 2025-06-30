@@ -9,8 +9,9 @@ import SwiftUI
 import AVKit
 
 struct AudioPlayerView: View {
-    let song: DownloadedSong
+    let song: Song                 // ← was DownloadedSong
     @Binding var player: AVPlayer?
+
     @State private var isPlaying = false
     @State private var currentTime: Double = 0
     @State private var duration: Double = 0
@@ -28,7 +29,8 @@ struct AudioPlayerView: View {
             // Progress Bar
             Slider(value: $currentTime, in: 0...max(duration, 1)) { editing in
                 if !editing {
-                    player?.seek(to: CMTime(seconds: currentTime, preferredTimescale: 1000))
+                    player?.seek(to: CMTime(seconds: currentTime,
+                                            preferredTimescale: 1_000))
                 }
             }
             .padding(.horizontal)
@@ -51,7 +53,9 @@ struct AudioPlayerView: View {
                 }
 
                 Button(action: togglePlayPause) {
-                    Image(systemName: isPlaying ? "pause.circle.fill" : "play.circle.fill")
+                    Image(systemName: isPlaying
+                          ? "pause.circle.fill"
+                          : "play.circle.fill")
                         .font(.system(size: 44))
                 }
 
@@ -64,30 +68,26 @@ struct AudioPlayerView: View {
         }
         .padding(.vertical)
         .background(Color(.systemBackground))
-        .onAppear {
-            setupPlayer()
-        }
-        .onDisappear {
-            timer?.invalidate()
-        }
+        .onAppear { setupPlayer() }
+        .onDisappear { timer?.invalidate() }
     }
 
+    // MARK: – Private helpers
     private func setupPlayer() {
-        guard let player = player else { return }
+        guard let player else { return }
 
-        // Get duration
-        if let duration = player.currentItem?.duration.seconds, !duration.isNaN {
-            self.duration = duration
+        if let dur = player.currentItem?.duration.seconds, !dur.isNaN {
+            duration = dur
         }
 
-        // Setup time observer
         timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
             currentTime = player.currentTime().seconds
-            isPlaying = player.timeControlStatus == .playing
+            isPlaying   = player.timeControlStatus == .playing
 
-            // Update duration if it wasn't available initially
-            if duration == 0, let newDuration = player.currentItem?.duration.seconds, !newDuration.isNaN {
-                duration = newDuration
+            if duration == 0,
+               let newDur = player.currentItem?.duration.seconds,
+               !newDur.isNaN {
+                duration = newDur
             }
         }
     }
@@ -102,21 +102,21 @@ struct AudioPlayerView: View {
     }
 
     private func skipForward() {
-        guard let player = player else { return }
+        guard let player else { return }
         let newTime = min(currentTime + 15, duration)
-        player.seek(to: CMTime(seconds: newTime, preferredTimescale: 1000))
+        player.seek(to: CMTime(seconds: newTime, preferredTimescale: 1_000))
     }
 
     private func skipBackward() {
-        guard let player = player else { return }
+        guard let player else { return }
         let newTime = max(currentTime - 15, 0)
-        player.seek(to: CMTime(seconds: newTime, preferredTimescale: 1000))
+        player.seek(to: CMTime(seconds: newTime, preferredTimescale: 1_000))
     }
 
-    private func formatTime(_ timeInSeconds: Double) -> String {
-        let minutes = Int(timeInSeconds) / 60
-        let seconds = Int(timeInSeconds) % 60
-        return String(format: "%d:%02d", minutes, seconds)
+    private func formatTime(_ s: Double) -> String {
+        let m = Int(s) / 60
+        let s = Int(s) % 60
+        return String(format: "%d:%02d", m, s)
     }
 }
 

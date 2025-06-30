@@ -10,23 +10,25 @@ import SwiftData
 
 @main
 struct eerf_musicApp: App {
-    var sharedModelContainer: ModelContainer = {
-        let schema = Schema([
-            Item.self,
-        ])
-        let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
-
-        do {
-            return try ModelContainer(for: schema, configurations: [modelConfiguration])
-        } catch {
-            fatalError("Could not create ModelContainer: \(error)")
-        }
+    // 1) Build a container that knows about Song
+    private let container: ModelContainer = {
+        let schema = Schema([Song.self])
+        return try! ModelContainer(for: schema)          // crash-on-fail is fine here
     }()
+
+    // 2) Create DownloadManager with the container’s main context
+    @StateObject private var manager: DownloadManager
+
+    init() {
+        let ctx = container.mainContext
+        _manager = StateObject(wrappedValue: DownloadManager(context: ctx))
+    }
 
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .modelContainer(container)      // inject SwiftData
+                .environmentObject(manager)     // inject manager
         }
-        .modelContainer(sharedModelContainer)
     }
 }

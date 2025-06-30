@@ -42,7 +42,7 @@ struct DownloaderView: View {
     }
 }
 
-#Preview {
-    DownloaderView()
-        .environmentObject(DownloadManager())
-}
+//#Preview {
+//    DownloaderView()
+//        .environmentObject(DownloadManager())
+//}

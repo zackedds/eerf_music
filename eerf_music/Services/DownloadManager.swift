@@ -8,52 +8,49 @@
 import SwiftUI
 import AVKit
 import YouTubeKit
+import SwiftData          // ← NEW
 
 @MainActor
 final class DownloadManager: ObservableObject {
-
-    // MARK: – Published state the UI binds to
+    // MARK: – Published state
     @Published var activeDownloads: [DownloadProgress] = []
-    @Published var downloadedSongs: [DownloadedSong] = []
     @Published var errorMessage: String?
 
-    // MARK: – Singleton audio player shared across views
-    @Published var player: AVPlayer?          // still optional
+    // Shared audio player
+    @Published var player: AVPlayer?
 
-    // MARK: – Persistence key
-    private let userDefaultsKey = "downloadedSongs"
+    // MARK: – SwiftData
+    private let context: ModelContext
 
-    init() {
-        loadSavedSongs()
+    init(context: ModelContext) {
+        self.context = context
         configureAudioSession()
     }
 
-    // MARK: – Public API
+    // MARK: – Public API ------------------------------------------------
 
     func startDownload(from urlString: String) {
         Task { await downloadSong(urlString) }
     }
 
-    func play(_ song: DownloadedSong) {
+    func play(_ song: Song) {
         player?.pause()
         player = AVPlayer(url: song.fileURL)
         player?.play()
     }
 
-    func delete(_ song: DownloadedSong) {
+    func delete(_ song: Song) {
         do {
             try FileManager.default.removeItem(at: song.fileURL)
-            downloadedSongs.removeAll { $0.id == song.id }
-            saveSongs()
+            context.delete(song)                       // SwiftData delete
         } catch {
             errorMessage = "Failed to delete song: \(error.localizedDescription)"
         }
     }
 
-    // MARK: – Private helpers
+    // MARK: – Private helpers ------------------------------------------
 
     private func downloadSong(_ urlString: String) async {
-        // clear any old error
         errorMessage = nil
 
         guard let url = URL(string: urlString) else {
@@ -63,195 +60,138 @@ final class DownloadManager: ObservableObject {
 
         do {
             // 1) Extract streams & metadata
-            let youtube = YouTube(url: url, methods: [.local, .remote])
-            let streams = try await youtube.streams
+            let yt = YouTube(url: url, methods: [.local, .remote])
+            let streams = try await yt.streams
 
             guard let audioStream = streams
-                .filterAudioOnly()
-                .filter({ $0.fileExtension == .m4a })
-                .highestAudioBitrateStream() else {
-                throw NSError(domain: "", code: -1, userInfo: [
-                    NSLocalizedDescriptionKey: "No suitable audio stream found"
-                ])
+                    .filterAudioOnly()
+                    .filter({ $0.fileExtension == .m4a })
+                    .highestAudioBitrateStream()
+            else {
+                throw NSError(domain: "", code: -1,
+                              userInfo: [NSLocalizedDescriptionKey:
+                                         "No suitable audio stream found"])
             }
 
-            guard let metadata = try await youtube.metadata else {
-                throw NSError(domain: "", code: -1, userInfo: [
-                    NSLocalizedDescriptionKey: "Failed to get metadata"
-                ])
+            guard let metadata = try await yt.metadata else {
+                throw NSError(domain: "", code: -1,
+                              userInfo: [NSLocalizedDescriptionKey:
+                                         "Failed to get metadata"])
             }
 
-            // 2) Create progress tracker
-            let downloadProgress = DownloadProgress(
+            // 2) Track progress in UI
+            let progressRow = DownloadProgress(
                 title: metadata.title,
-                progress: 0.0,
+                progress: 0,
                 isCompleted: false,
-                error: nil
-            )
-            activeDownloads.append(downloadProgress)
+                error: nil)
+            activeDownloads.append(progressRow)
 
-            // 3) Kick off URLSession download
-            let downloadTask = URLSession.shared.downloadTask(with: audioStream.url) { localURL, response, error in
+            // 3) Download
+            let task = URLSession.shared.downloadTask(with: audioStream.url) {
+                localURL, _, err in
                 Task { await self.handleDownloadCompletion(
                     localURL: localURL,
-                    response: response,
-                    error: error,
+                    error: err,
                     metadata: metadata,
-                    downloadProgress: downloadProgress
-                ) }
+                    progressRow: progressRow)
+                }
             }
 
-            // 4) Observe progress
-            let observation = downloadTask.progress.observe(\.fractionCompleted) { prog, _ in
+            let obs = task.progress.observe(\.fractionCompleted) { prog, _ in
                 Task { @MainActor in
-                    if let idx = self.activeDownloads.firstIndex(where: { $0.id == downloadProgress.id }) {
+                    if let idx = self.activeDownloads
+                        .firstIndex(where: { $0.id == progressRow.id }) {
                         self.activeDownloads[idx].progress = prog.fractionCompleted
                     }
                 }
             }
 
-            downloadTask.resume()
-            _ = observation  // keep it alive
+            task.resume()
+            _ = obs      // keep observation alive
 
-        } catch {
-            errorMessage = error.localizedDescription
-        }
+        } catch { errorMessage = error.localizedDescription }
     }
 
     private func handleDownloadCompletion(
         localURL: URL?,
-        response: URLResponse?,
         error: Error?,
         metadata: YouTubeMetadata,
-        downloadProgress: DownloadProgress
+        progressRow: DownloadProgress
     ) async {
         do {
-            // ensure we got a file
-            guard let localURL = localURL else {
-                throw error ?? NSError(domain: "", code: -1, userInfo: [
-                    NSLocalizedDescriptionKey: "Download failed"
-                ])
+            guard let localURL else {
+                throw error ?? NSError(domain: "", code: -1,
+                                       userInfo: [NSLocalizedDescriptionKey:
+                                                  "Download failed"])
             }
 
-            let fileManager = FileManager.default
-            let docs = fileManager.urls(
-                for: .documentDirectory,
-                in: .userDomainMask
-            )[0]
-
-            // move it into place
+            let fm  = FileManager.default
+            let docs = fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
             let fileName = "\(metadata.title).m4a"
-                .replacingOccurrences(of: "/", with: "-")
-            let destURL = docs.appendingPathComponent(fileName)
-            try? fileManager.removeItem(at: destURL)
-            try fileManager.moveItem(at: localURL, to: destURL)
+                            .replacingOccurrences(of: "/", with: "-")
+            let destURL  = docs.appendingPathComponent(fileName)
+            try? fm.removeItem(at: destURL)
+            try fm.moveItem(at: localURL, to: destURL)
 
-            // 1) Use AVURLAsset instead of deprecated AVAsset(url:)
+            // Trim (same logic as before, using AVURLAsset + new exporter API)
             let asset = AVURLAsset(url: destURL)
-            let duration = try await asset.load(.duration)
-            let seconds = CMTimeGetSeconds(duration)
+            let dur   = try await asset.load(.duration)
+            let secs  = CMTimeGetSeconds(dur)
 
-            if seconds > 0 {
-                // half-length trim
-                let half = seconds / 2
+            if secs > 0 {
+                let half    = secs / 2
                 let tempURL = docs.appendingPathComponent("temp_\(fileName)")
-                
                 guard let exporter = AVAssetExportSession(
-                    asset: asset,
-                    presetName: AVAssetExportPresetAppleM4A
-                ) else {
-                    print("Failed to create exporter")
-                    return
+                        asset: asset,
+                        presetName: AVAssetExportPresetAppleM4A) else {
+                    print("Exporter create fail"); throw NSError()
                 }
-                
-                exporter.outputURL = tempURL
+                exporter.outputURL      = tempURL
                 exporter.outputFileType = .m4a
                 exporter.timeRange = CMTimeRange(
                     start: .zero,
-                    duration: CMTime(seconds: half, preferredTimescale: 1000)
-                )
-                
-                try? fileManager.removeItem(at: tempURL)
-                
+                    duration: CMTime(seconds: half, preferredTimescale: 1000))
+
+                try? fm.removeItem(at: tempURL)
+
                 if #available(iOS 18, *) {
-                    // 2) Use the new async export(to:as:) API and rely on throws
-                    do {
-                        try await exporter.export(to: tempURL, as: .m4a)
-                        // replace original only on success
-                        try fileManager.removeItem(at: destURL)
-                        try fileManager.moveItem(at: tempURL, to: destURL)
-                    } catch {
-                        print("Trim export failed: \(error.localizedDescription)")
-                        // fallback to original file
-                    }
+                    try? await exporter.export(to: tempURL, as: .m4a)
+                    try? fm.removeItem(at: destURL)
+                    try? fm.moveItem(at: tempURL, to: destURL)
                 } else {
-                    // 3) Fallback for iOS 17 and below
                     exporter.exportAsynchronously {
-                        switch exporter.status {
-                        case .completed:
-                            try? fileManager.removeItem(at: destURL)
-                            try? fileManager.moveItem(at: tempURL, to: destURL)
-                        case .failed, .cancelled:
-                            if let err = exporter.error {
-                                print("Trim export failed: \(err.localizedDescription)")
-                            }
-                        default:
-                            break
+                        if exporter.status == .completed {
+                            try? fm.removeItem(at: destURL)
+                            try? fm.moveItem(at: tempURL, to: destURL)
                         }
                     }
                 }
             }
 
-            // record file size & build model
-            let attrs = try fileManager.attributesOfItem(atPath: destURL.path)
-            let size = attrs[.size] as? Int
-            let newSong = DownloadedSong(
-                id: UUID(),
-                title: metadata.title,
-                fileURL: destURL,
-                fileSize: size
-            )
+            // Build SwiftData entity & save
+            let attrs  = try fm.attributesOfItem(atPath: destURL.path)
+            let sz     = attrs[.size] as? Int
+            let song   = Song(title: metadata.title,
+                              fileName: fileName,
+                              fileSize: sz)
+            context.insert(song)
 
-            // update lists
-            downloadedSongs.append(newSong)
-            activeDownloads.removeAll { $0.id == downloadProgress.id }
-            saveSongs()
+            // Remove row from active list
+            activeDownloads.removeAll { $0.id == progressRow.id }
 
         } catch {
-            // mark the download row errored
-            if let idx = activeDownloads.firstIndex(where: { $0.id == downloadProgress.id }) {
+            if let idx = activeDownloads
+                .firstIndex(where: { $0.id == progressRow.id }) {
                 activeDownloads[idx].error = error.localizedDescription
             }
         }
     }
 
-    private func saveSongs() {
-        if let data = try? JSONEncoder().encode(downloadedSongs) {
-            UserDefaults.standard.set(data, forKey: userDefaultsKey)
-        }
-    }
-
-    private func loadSavedSongs() {
-        guard let data = UserDefaults.standard.data(forKey: userDefaultsKey),
-              let decoded = try? JSONDecoder().decode([DownloadedSong].self, from: data)
-        else { return }
-
-        // filter out missing files
-        downloadedSongs = decoded.filter {
-            FileManager.default.fileExists(atPath: $0.fileURL.path)
-        }
-        if downloadedSongs.count != decoded.count {
-            saveSongs()
-        }
-    }
-
     private func configureAudioSession() {
         do {
-            try AVAudioSession.sharedInstance()
-                .setCategory(.playback)
+            try AVAudioSession.sharedInstance().setCategory(.playback)
             try AVAudioSession.sharedInstance().setActive(true)
-        } catch {
-            print("Audio session error: \(error)")
-        }
+        } catch { print("Audio session error: \(error)") }
     }
 }
